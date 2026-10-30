@@ -290,6 +290,17 @@ def path_key(path: str) -> str:
     return os.path.normcase(os.path.abspath(path))
 
 
+def is_within_path(path: str, root: str) -> bool:
+    """True if path is root itself or a descendant of root."""
+    candidate = os.path.normcase(os.path.abspath(path))
+    boundary = os.path.normcase(os.path.abspath(root))
+    if candidate == boundary:
+        return True
+    if boundary.endswith(("\\", "/")):
+        return candidate.startswith(boundary)
+    return candidate.startswith(boundary + os.sep)
+
+
 def is_windows() -> bool:
     return os.name == "nt"
 
@@ -1139,6 +1150,14 @@ class ListWindow(tk.Toplevel):
         tree_frame.columnconfigure(0, weight=1)
         tree_frame.rowconfigure(0, weight=1)
 
+        base_font = tkfont.nametofont("TkDefaultFont")
+        row_height = max(20, base_font.metrics("linespace") + 8)
+        ttk.Style(self).configure(
+            "Treeview",
+            font=base_font,
+            rowheight=row_height,
+        )
+
         self.tree = ttk.Treeview(
             tree_frame,
             columns=("name", "type", "size", "path"),
@@ -1337,6 +1356,7 @@ class TreemapApp:
         self.list_windows: list[ListWindow] = []
 
         self._build_ui()
+        self._maximize()
         self._update_buttons()
         self._update_status_idle()
         self._update_summary()
@@ -1446,9 +1466,40 @@ class TreemapApp:
 
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         self.root.bind("<F5>", lambda event: self.on_refresh())
-        self.root.bind("<Escape>", lambda event: self._cancel_current_scan())
+        self.root.bind("<F11>", lambda event: self._toggle_fullscreen())
+        self.root.bind("<Escape>", lambda event: self._on_escape())
         self.root.bind("<Alt-Up>", lambda event: self.on_up())
         self.root.bind("<Alt-Left>", lambda event: self.on_up())
+
+    def _maximize(self) -> None:
+        try:
+            self.root.state("zoomed")
+        except tk.TclError:
+            try:
+                self.root.attributes("-zoomed", True)
+            except tk.TclError:
+                pass
+
+    def _is_fullscreen(self) -> bool:
+        try:
+            return bool(int(self.root.attributes("-fullscreen")))
+        except (tk.TclError, TypeError, ValueError):
+            return False
+
+    def _set_fullscreen(self, enabled: bool) -> None:
+        try:
+            self.root.attributes("-fullscreen", enabled)
+        except tk.TclError:
+            pass
+
+    def _toggle_fullscreen(self) -> None:
+        self._set_fullscreen(not self._is_fullscreen())
+
+    def _on_escape(self) -> None:
+        if self.scanning:
+            self._cancel_current_scan()
+        elif self._is_fullscreen():
+            self._set_fullscreen(False)
 
     def _load_initial(self) -> None:
         self._initial_job = None
@@ -1776,10 +1827,6 @@ class TreemapApp:
             return
         if self.view_node.parent is not None:
             self._zoom_to(self.view_node.parent)
-            return
-        parent = os.path.dirname(self.view_node.path)
-        if os.path.normcase(parent) != os.path.normcase(self.view_node.path):
-            self.load_path(parent)
 
     def _zoom_to(self, node: Node) -> None:
         if node.kind != "dir":
@@ -1800,11 +1847,13 @@ class TreemapApp:
         self._update_status_idle()
 
     def _on_breadcrumb_click(self, path: str) -> None:
+        if self.tree_root is None:
+            return
+        if not is_within_path(path, self.tree_root.path):
+            return
         node = self.nodes_by_path.get(path_key(path))
         if node is not None:
             self._zoom_to(node)
-        else:
-            self.load_path(path)
 
     def _update_breadcrumb(self) -> None:
         for child in self.breadcrumb_frame.winfo_children():
@@ -1834,19 +1883,29 @@ class TreemapApp:
 
         # Pack from the current segment backwards so the most useful part of
         # the breadcrumb stays visible when the path is wider than the window.
+        scan_root = self.tree_root.path if self.tree_root is not None else None
         for index in range(len(segments) - 1, -1, -1):
             label, segment_path = segments[index]
             is_current = index == len(segments) - 1
+            within_root = (
+                scan_root is not None
+                and is_within_path(segment_path, scan_root)
+            )
+            clickable = within_root and not is_current
             widget = tk.Label(
                 self.breadcrumb_frame,
                 text=label,
                 bg=self._breadcrumb_bg,
-                fg=COLOR_TEXT if is_current else COLOR_LINK,
+                fg=(
+                    COLOR_TEXT
+                    if is_current
+                    else (COLOR_LINK if clickable else COLOR_MUTED)
+                ),
                 font=self.view.bold_font if is_current else self.view.ui_font,
-                cursor="" if is_current else "hand2",
+                cursor="hand2" if clickable else "",
             )
             widget.pack(side="right", padx=2)
-            if not is_current:
+            if clickable:
                 widget.bind(
                     "<Button-1>",
                     lambda event, segment=segment_path: self._on_breadcrumb_click(
@@ -1863,15 +1922,11 @@ class TreemapApp:
 
     def _update_buttons(self) -> None:
         has_tree = self.tree_root is not None and self.view_node is not None
-        up_ok = False
-        if has_tree and self.view_node is not None:
-            if self.view_node.parent is not None:
-                up_ok = True
-            else:
-                parent = os.path.dirname(self.view_node.path)
-                up_ok = os.path.normcase(parent) != os.path.normcase(
-                    self.view_node.path
-                )
+        up_ok = (
+            has_tree
+            and self.view_node is not None
+            and self.view_node.parent is not None
+        )
         self.up_btn.state(["!disabled"] if up_ok else ["disabled"])
         refresh_ok = has_tree and not self.scanning
         self.refresh_btn.state(["!disabled"] if refresh_ok else ["disabled"])
