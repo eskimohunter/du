@@ -35,9 +35,9 @@ du.cmd --help
 Or invoke the script directly:
 
 ```powershell
-python du.py
-python du.py "C:\some\folder"
+py -3 du.py
 py -3 du.py "C:\some\folder"
+python du.py
 ```
 
 If a folder is passed on the command line, it is scanned immediately after the window opens. Without a path, the app starts blank.
@@ -71,7 +71,7 @@ If a folder is passed on the command line, it is scanned immediately after the w
 | Refresh / F5 | Rescan the loaded search root |
 | Double-click folder | Zoom into the folder |
 | Double-click Small files / Other | Open the corresponding list |
-| Esc | Cancel an active scan; exit fullscreen when idle |
+| Esc | Cancel an active scan; otherwise exit fullscreen if active |
 | F11 | Toggle fullscreen |
 | Alt+F4 | Close the app |
 

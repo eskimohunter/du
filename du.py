@@ -211,7 +211,7 @@ def format_size(size: int) -> str:
     if size < 1024:
         return f"{size:,} B"
     value = float(size)
-    for unit in ("KB", "MB", "GB", "TB", "PB", "EB", "ZB", "YB"):
+    for unit in ("KiB", "MiB", "GiB", "TiB", "PiB", "EiB", "ZiB", "YiB"):
         value /= 1024.0
         if value < 1024.0 or unit == "YB":
             if value >= 100:
@@ -1113,6 +1113,7 @@ class ListWindow(tk.Toplevel):
         loader: Loader | None = None,
         on_zoom: Callable[[Node], None] | None = None,
         on_group: Callable[[Node], None] | None = None,
+        on_other: Callable[[Node], None] | None = None,
         on_close: Callable[["ListWindow"], None] | None = None,
     ) -> None:
         super().__init__(master)
@@ -1123,6 +1124,7 @@ class ListWindow(tk.Toplevel):
         self._loader = loader
         self._on_zoom = on_zoom
         self._on_group = on_group
+        self._on_other = on_other
         self._on_close = on_close
         self._nodes: dict[str, Node] = {}
         self._queue: queue.Queue = queue.Queue()
@@ -1298,6 +1300,8 @@ class ListWindow(tk.Toplevel):
             self.close()
         elif node.kind == "group" and self._on_group is not None:
             self._on_group(node)
+        elif node.kind == "other" and self._on_other is not None:
+            self._on_other(node)
 
     def _cancel_poll(self) -> None:
         if self._poll_job is not None:
@@ -2060,6 +2064,7 @@ class TreemapApp:
             rows=rows,
             on_zoom=self._zoom_to,
             on_group=self._open_small_files,
+            on_other=self._open_other,
             on_close=self._forget_list_window,
         )
         self.list_windows.append(window)
