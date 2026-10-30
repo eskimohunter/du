@@ -4,6 +4,15 @@ Run with:
     python du.py [folder]
 
 If a folder is supplied, it is scanned immediately after the window opens.
+
+The application is intentionally a single file using only the standard
+library.  The main pieces, in order, are:
+
+* helper functions (path handling, formatting, squarified treemap layout)
+* :class:`Scanner` - builds the :class:`Node` tree in a worker thread
+* :class:`TreemapView` - draws the nested treemap on a canvas
+* :class:`ListWindow` - small-files / Other item lists
+* :class:`TreemapApp` - top-level window, toolbar, breadcrumb, status bar
 """
 
 from __future__ import annotations
@@ -29,11 +38,17 @@ APP_TITLE = "du – Disk Usage"
 # into one "Small files" box per directory.
 LARGE_FILE_THRESHOLD = 100 * 1024 * 1024  # 100 MiB
 
+# How many levels of folders may be drawn nested inside each other before a
+# folder is drawn as a plain leaf box.
 MAX_NEST_DEPTH = 8
+# Polling interval (ms) for worker-thread results on the Tk main thread.
 POLL_MS = 100
+# Delay (ms) before a window resize triggers a redraw.
 RESIZE_DEBOUNCE_MS = 120
+# Minimum time (s) between progress updates emitted by the scanner.
 PROGRESS_INTERVAL_S = 0.10
 
+# Layout constants (pixels).
 MARGIN = 8
 GAP = 2
 FOLDER_HEADER_PAD = 4
@@ -47,6 +62,7 @@ AGG_MIN_AREA = AGG_MIN_W * AGG_MIN_H
 OTHER_MIN_W = 48
 OTHER_MIN_H = 24
 
+# Colour palette (light theme).
 COLOR_CANVAS = "#F4F5F7"
 COLOR_FOLDER_BODY = "#DCE8F0"
 COLOR_FOLDER_LEAF = "#C4DCE8"
@@ -73,7 +89,7 @@ class ScanCancelled(Exception):
 class Node:
     """One item in the scanned tree.
 
-    kind is one of "dir", "file", "group" or "other".
+    ``kind`` is one of ``"dir"``, ``"file"``, ``"group"`` or ``"other"``.
     Directories own their children. Files, groups and synthetic "other" nodes
     are leaves as far as the tree is concerned.
     """
@@ -101,6 +117,8 @@ Loader = Callable[[threading.Event], tuple[list[Row], int, int, str | None] | No
 
 @dataclass(slots=True)
 class ScanStats:
+    """Running counters updated by the scanner and shown in the UI."""
+
     files: int = 0
     bytes: int = 0
     last_emit: float = 0.0
@@ -108,6 +126,8 @@ class ScanStats:
 
 @dataclass(slots=True)
 class ScanResult:
+    """Outcome of a full scan."""
+
     root: Node
     nodes_by_path: dict[str, Node]
     elapsed: float
@@ -115,13 +135,24 @@ class ScanResult:
 
 @dataclass(frozen=True, slots=True)
 class Rect:
+    """A rectangle used by the squarified layout."""
+
     x: float
     y: float
     w: float
     h: float
 
 
+# ---------------------------------------------------------------------------
+# Squarified treemap layout helpers
+# ---------------------------------------------------------------------------
+
+
 def _worst_ratio(row: Sequence[float], side: float) -> float:
+    """Worst aspect ratio for a row of rectangles laid along ``side``.
+
+    Lower is better.  Returns infinity for unusable input.
+    """
     total = sum(row)
     if not row or total <= 0 or side <= 0:
         return float("inf")
@@ -143,6 +174,7 @@ def _layout_row(
     h: float,
     rects: list[Rect],
 ) -> tuple[float, float, float, float]:
+    """Lay out one row of rectangles and return the remaining area."""
     total = sum(row)
     if total <= 0 or w <= 0 or h <= 0:
         return x, y, w, h
@@ -170,9 +202,10 @@ def squarify(
     w: float,
     h: float,
 ) -> list[Rect]:
-    """Lay out rectangles with areas proportional to sizes, largest first.
+    """Lay out rectangles with areas proportional to ``sizes``.
 
-    The caller is expected to pass sizes in descending order.
+    The caller is expected to pass sizes in descending order.  Returns one
+    rectangle per input size.
     """
     if not sizes or w <= 0 or h <= 0:
         return []
@@ -186,6 +219,7 @@ def squarify(
     index = 0
     while index < len(areas) or row:
         if w <= 0 or h <= 0:
+            # Out of space: emit zero-size rects for the remainder.
             for _ in range(len(row) + (len(areas) - index)):
                 rects.append(Rect(x, y, 0.0, 0.0))
             break
@@ -208,13 +242,19 @@ def squarify(
     return rects
 
 
+# ---------------------------------------------------------------------------
+# General helpers
+# ---------------------------------------------------------------------------
+
+
 def format_size(size: int) -> str:
+    """Format a byte count in human-readable binary units."""
     if size < 1024:
         return f"{size:,} B"
     value = float(size)
     for unit in ("KiB", "MiB", "GiB", "TiB", "PiB", "EiB", "ZiB", "YiB"):
         value /= 1024.0
-        if value < 1024.0 or unit == "YB":
+        if value < 1024.0 or unit == "YiB":
             if value >= 100:
                 return f"{value:.0f} {unit}"
             if value >= 10:
@@ -224,28 +264,23 @@ def format_size(size: int) -> str:
 
 
 def format_count(value: int) -> str:
+    """Format an integer with thousands separators."""
     return f"{value:,}"
 
 
 def format_plural(count: int, singular: str, plural: str | None = None) -> str:
+    """Return a count plus a singular/plural word."""
     word = singular if count == 1 else (plural if plural is not None else singular + "s")
     return f"{format_count(count)} {word}"
 
 
 def sanitize_name(name: str) -> str:
+    """Replace control characters that would break canvas text layout."""
     return name.replace("\n", " ").replace("\r", " ").replace("\t", " ")
 
 
-def truncate_middle(text: str, max_len: int) -> str:
-    if len(text) <= max_len:
-        return text
-    if max_len < 8:
-        return text[:max_len]
-    keep = (max_len - 1) // 2
-    return text[:keep] + "…" + text[-(max_len - keep - 1):]
-
-
 def truncate_text(font: tkfont.Font, text: str, max_width: float) -> str:
+    """Truncate ``text`` so it fits in ``max_width`` pixels, adding an ellipsis."""
     if not text or max_width <= 0:
         return ""
     if font.measure(text) <= max_width:
@@ -264,7 +299,18 @@ def truncate_text(font: tkfont.Font, text: str, max_width: float) -> str:
     return (text[:low] + ellipsis) if low else ellipsis
 
 
+def truncate_middle(text: str, max_len: int) -> str:
+    """Truncate ``text`` in the middle, keeping both ends visible."""
+    if len(text) <= max_len:
+        return text
+    if max_len < 8:
+        return text[:max_len]
+    keep = (max_len - 1) // 2
+    return text[:keep] + "…" + text[-(max_len - keep - 1):]
+
+
 def display_name(path: str) -> str:
+    """Last path component, or the path itself for a root/drive."""
     path = strip_long_path_prefix(path)
     stripped = path.rstrip("\\/")
     name = os.path.basename(stripped)
@@ -272,39 +318,16 @@ def display_name(path: str) -> str:
 
 
 def clean_path(path: str) -> str:
-    """Normalize a path.
-
-    os.path.normpath already drops a trailing separator, so no special-casing
-    for UNC share roots is needed.
-    """
+    """Normalize a path using os.path.normpath."""
     return os.path.normpath(path)
 
 
-def _long_path_prefix() -> str:
-    return "\\\\?\\" if is_windows() else ""
-
-
-def strip_long_path_prefix(path: str) -> str:
-    prefix = _long_path_prefix()
-    if prefix and path.startswith(prefix):
-        return path[len(prefix):]
-    return path
-
-
-def to_long_path(path: str) -> str:
-    if not is_windows():
-        return path
-    if path.startswith("\\\\?\\"):
-        return path
-    # UNC paths use the \\?\UNC\ form.
-    if path.startswith("\\\\"):
-        return "\\\\?\\UNC\\" + path.lstrip("\\")
-    if len(path) >= 260:
-        return "\\\\?\\" + path
-    return path
-
-
 def normalize_path(raw: str) -> str:
+    """Clean up user input and return an absolute, normalized path.
+
+    On Windows, very long paths are converted to the ``\\\\?\\`` form so the
+    filesystem APIs can handle them.
+    """
     if not raw:
         return ""
     text = raw.strip()
@@ -318,12 +341,13 @@ def normalize_path(raw: str) -> str:
 
 
 def path_key(path: str) -> str:
+    """Case-insensitive key used to look up nodes by path."""
     path = strip_long_path_prefix(path)
     return os.path.normcase(os.path.abspath(path))
 
 
 def is_within_path(path: str, root: str) -> bool:
-    """True if path is root itself or a descendant of root."""
+    """True if ``path`` is ``root`` itself or a descendant of ``root``."""
     path = strip_long_path_prefix(path)
     root = strip_long_path_prefix(root)
     candidate = os.path.normcase(os.path.abspath(path))
@@ -336,26 +360,33 @@ def is_within_path(path: str, root: str) -> bool:
 
 
 def is_windows() -> bool:
+    """True when running on Windows."""
     return os.name == "nt"
 
 
-def open_in_explorer(path: str) -> None:
-    """Open Windows Explorer with the given path selected/highlighted."""
+def strip_long_path_prefix(path: str) -> str:
+    """Remove the ``\\\\?\\`` prefix, if present."""
+    prefix = "\\\\?\\" if is_windows() else ""
+    if prefix and path.startswith(prefix):
+        return path[len(prefix):]
+    return path
+
+
+def to_long_path(path: str) -> str:
+    """Apply the ``\\\\?\\`` prefix on Windows for long/UNC paths."""
     if not is_windows():
-        return
-    path = strip_long_path_prefix(path)
-    if not path:
-        return
-    try:
-        if os.path.isdir(path):
-            subprocess.Popen(["explorer", path])
-        else:
-            subprocess.Popen(["explorer", f"/select,{path}"])
-    except OSError:
-        pass
+        return path
+    if path.startswith("\\\\?\\"):
+        return path
+    if path.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + path.lstrip("\\")
+    if len(path) >= 260:
+        return "\\\\?\\" + path
+    return path
 
 
 def enable_dpi_awareness() -> None:
+    """Make the process DPI-aware on Windows (best effort)."""
     if not is_windows():
         return
     try:
@@ -372,9 +403,9 @@ def load_small_files(
     cancel: threading.Event,
     threshold: int,
 ) -> tuple[list[Row], int, int, str | None] | None:
-    """Load the direct files below threshold in folder_path.
+    """Load the direct files below ``threshold`` in ``folder_path``.
 
-    Returns (rows, total_size, error_count, fatal_error_message), or None when
+    Returns ``(rows, total_size, error_count, fatal_error)`` or ``None`` when
     cancelled.
     """
     rows: list[Row] = []
@@ -408,8 +439,29 @@ def load_small_files(
     return rows, total, errors, None
 
 
+def open_in_explorer(path: str) -> None:
+    """Open Windows Explorer with ``path`` selected/highlighted."""
+    if not is_windows():
+        return
+    path = strip_long_path_prefix(path)
+    if not path:
+        return
+    try:
+        if os.path.isdir(path):
+            subprocess.Popen(["explorer", path])
+        else:
+            subprocess.Popen(["explorer", f"/select,{path}"])
+    except OSError:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Scanner
+# ---------------------------------------------------------------------------
+
+
 class Scanner:
-    """Recursively build a Node tree without touching Tk."""
+    """Recursively build a :class:`Node` tree without touching Tk."""
 
     def __init__(self, threshold: int) -> None:
         self.threshold = threshold
@@ -420,6 +472,11 @@ class Scanner:
         cancel: threading.Event,
         progress: Callable[[str, ScanStats], None],
     ) -> ScanResult:
+        """Scan ``root_path`` and return a :class:`ScanResult`.
+
+        ``progress`` is called (from the worker thread) with the current path
+        and running stats.  Raises :class:`ScanCancelled` if cancelled.
+        """
         start = time.monotonic()
         stats = ScanStats(last_emit=start)
         index: dict[str, Node] = {}
@@ -451,6 +508,7 @@ class Scanner:
         start: float,
         index: dict[str, Node],
     ) -> Node:
+        """Scan one directory and return its node."""
         if cancel.is_set():
             raise ScanCancelled
         node = Node(name=name, path=path, size=0, kind="dir", parent=parent)
@@ -461,6 +519,7 @@ class Scanner:
                     if cancel.is_set():
                         raise ScanCancelled
                     try:
+                        # Symlinks and reparse points are skipped to avoid loops.
                         if entry.is_symlink():
                             node.link_count += 1
                             self._maybe_progress(progress, entry.path, stats, cancel)
@@ -519,6 +578,7 @@ class Scanner:
         except OSError:
             node.error_count += 1
             node.scan_failed = True
+        # Group small files into a single "Small files" child when present.
         if node.small_count:
             node.children.append(
                 Node(
@@ -568,12 +628,18 @@ class Scanner:
         stats: ScanStats,
         cancel: threading.Event | None = None,
     ) -> None:
+        """Emit a progress update at most every PROGRESS_INTERVAL_S seconds."""
         if cancel is not None and cancel.is_set():
             return
         now = time.monotonic()
         if now - stats.last_emit >= PROGRESS_INTERVAL_S:
             stats.last_emit = now
             progress(path, stats)
+
+
+# ---------------------------------------------------------------------------
+# Treemap view
+# ---------------------------------------------------------------------------
 
 
 class TreemapView(tk.Canvas):
@@ -641,18 +707,21 @@ class TreemapView(tk.Canvas):
         self.bind("<Destroy>", self._on_destroy, add="+")
 
     def set_root(self, node: Node) -> None:
+        """Set the displayed root and redraw."""
         self.view_root = node
         self._message_title = ""
         self._message_subtitle = ""
         self.redraw()
 
     def show_message(self, title: str, subtitle: str = "") -> None:
+        """Show a centred message instead of a treemap."""
         self.view_root = None
         self._message_title = title
         self._message_subtitle = subtitle
         self.redraw()
 
     def redraw(self) -> None:
+        """Redraw the whole canvas."""
         self._reset_hover()
         if self._context_menu is not None:
             try:
@@ -731,6 +800,7 @@ class TreemapView(tk.Canvas):
             )
 
     def _layout_children(self, parent: Node, rect: Rect, depth: int) -> None:
+        """Recursively lay out ``parent``'s children inside ``rect``."""
         if rect.w <= 0 or rect.h <= 0:
             return
         children = [child for child in parent.children if child.size > 0]
@@ -740,6 +810,7 @@ class TreemapView(tk.Canvas):
 
         layout_nodes = children
         other: Node | None = None
+        # Aggregate tiny items into an "Other" box (up to two passes).
         for _ in range(2):
             rects = squarify(
                 [node.size for node in layout_nodes],
@@ -800,9 +871,8 @@ class TreemapView(tk.Canvas):
                 others.append((node, child_rect))
             else:
                 normal.append((node, child_rect))
-        # Draw the synthetic Other box first so a normal sibling that it
-        # overlaps stays visible and clickable; the toolbar Other button gives
-        # reliable access to the aggregate.
+        # Draw Other first so overlapping normal siblings stay on top and
+        # clickable; the toolbar Other button gives reliable access.
         for node, child_rect in others:
             self._draw_node(node, child_rect, depth)
         for node, child_rect in normal:
@@ -1136,6 +1206,7 @@ class TreemapView(tk.Canvas):
             self.on_other(node)
 
     def _on_right_click(self, event: tk.Event) -> None:
+        """Show a context menu for the item under the cursor."""
         current = self.find_withtag("current")
         if not current:
             return
@@ -1193,6 +1264,11 @@ class TreemapView(tk.Canvas):
             except tk.TclError:
                 pass
             self._resize_job = None
+
+
+# ---------------------------------------------------------------------------
+# List window
+# ---------------------------------------------------------------------------
 
 
 class ListWindow(tk.Toplevel):
@@ -1452,6 +1528,11 @@ class ListWindow(tk.Toplevel):
             self._on_close(self)
 
 
+# ---------------------------------------------------------------------------
+# Application
+# ---------------------------------------------------------------------------
+
+
 class TreemapApp:
     """Top-level application: toolbar, breadcrumb, canvas and status bar."""
 
@@ -1634,6 +1715,7 @@ class TreemapApp:
         self.load_path(self.path_var.get())
 
     def load_path(self, raw_path: str) -> bool:
+        """Validate ``raw_path`` and start a scan if it is a folder."""
         if self._closing:
             return False
         path = normalize_path(raw_path)
@@ -1708,6 +1790,7 @@ class TreemapApp:
 
         if kind == "load":
             self._close_list_windows()
+            # Save the currently loaded tree so a cancelled load can restore it.
             if self.tree_root is not None:
                 path_text = (
                     self.view_node.path if self.view_node else self.path_var.get()
@@ -1879,6 +1962,7 @@ class TreemapApp:
         )
 
     def _restore_previous_state(self) -> None:
+        """Restore the tree that was loaded before a cancelled/failed load."""
         state = self._previous_state
         self._previous_state = None
         if state is None:
@@ -1946,6 +2030,7 @@ class TreemapApp:
         self._start_scan(self.tree_root.path, "refresh")
 
     def on_up(self) -> None:
+        """Move to the parent folder, stopping at the loaded search root."""
         if self.view_node is None:
             return
         if self.view_node.parent is not None:
