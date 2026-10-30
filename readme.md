@@ -18,6 +18,7 @@ Tested with Python 3.14 / Tk 8.6 on Windows.
 | --- | --- |
 | `du.py` | The application (single file, standard library only) |
 | `du.cmd` | Windows launcher; forwards all arguments to `du.py` |
+| `smoke_test.py` | Optional stdlib-only smoke tests (`py -3 smoke_test.py`) |
 
 ## Usage
 
@@ -55,11 +56,12 @@ If a folder is passed on the command line, it is scanned immediately after the w
 - Up stops at the loaded search root. Use the path box or Browse to load a different folder as a new search root.
 - Refresh rescans the loaded root and keeps the current zoomed view when it still exists.
 - Background scanning with progress, cancellation, and a responsive UI.
-- Small-files and Other list windows with name, type, size, and path columns, sorted by size; rows are sized from the UI font.
+- Small-files list window with name, type, and size columns; Other list window also includes a path column; both sorted by size with rows sized from the UI font.
 - Hidden and system files are included.
 - Symlinks, junctions, and mount points are skipped to avoid loops; unreadable items and skipped links are counted.
 - Zero-byte files and empty folders are not drawn; they are counted in the status bar.
 - Status bar shows totals, hover details, progress, empty/link/unreadable counts, and items too small to draw.
+- Long Windows paths are supported via the `\\?\` prefix internally.
 
 ## Controls
 
@@ -71,6 +73,7 @@ If a folder is passed on the command line, it is scanned immediately after the w
 | Refresh / F5 | Rescan the loaded search root |
 | Double-click folder | Zoom into the folder |
 | Double-click Small files / Other | Open the corresponding list |
+| Right-click file/folder box | Open in Windows Explorer / copy path (treemap only) |
 | Esc | Cancel an active scan; otherwise exit fullscreen if active |
 | F11 | Toggle fullscreen |
 | Alt+F4 | Close the app |

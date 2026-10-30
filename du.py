@@ -13,6 +13,7 @@ import math
 import os
 import queue
 import stat
+import subprocess
 import sys
 import threading
 import time
@@ -235,6 +236,15 @@ def sanitize_name(name: str) -> str:
     return name.replace("\n", " ").replace("\r", " ").replace("\t", " ")
 
 
+def truncate_middle(text: str, max_len: int) -> str:
+    if len(text) <= max_len:
+        return text
+    if max_len < 8:
+        return text[:max_len]
+    keep = (max_len - 1) // 2
+    return text[:keep] + "…" + text[-(max_len - keep - 1):]
+
+
 def truncate_text(font: tkfont.Font, text: str, max_width: float) -> str:
     if not text or max_width <= 0:
         return ""
@@ -255,22 +265,42 @@ def truncate_text(font: tkfont.Font, text: str, max_width: float) -> str:
 
 
 def display_name(path: str) -> str:
+    path = strip_long_path_prefix(path)
     stripped = path.rstrip("\\/")
     name = os.path.basename(stripped)
     return name or path
 
 
 def clean_path(path: str) -> str:
-    """Normalize a path and drop a trailing separator on a UNC share root."""
-    path = os.path.normpath(path)
-    if (
-        os.name == "nt"
-        and path.startswith("\\\\")
-        and not path.startswith("\\\\?\\")
-        and len(path) > 2
-        and path.endswith(("\\", "/"))
-    ):
-        path = path.rstrip("\\/")
+    """Normalize a path.
+
+    os.path.normpath already drops a trailing separator, so no special-casing
+    for UNC share roots is needed.
+    """
+    return os.path.normpath(path)
+
+
+def _long_path_prefix() -> str:
+    return "\\\\?\\" if is_windows() else ""
+
+
+def strip_long_path_prefix(path: str) -> str:
+    prefix = _long_path_prefix()
+    if prefix and path.startswith(prefix):
+        return path[len(prefix):]
+    return path
+
+
+def to_long_path(path: str) -> str:
+    if not is_windows():
+        return path
+    if path.startswith("\\\\?\\"):
+        return path
+    # UNC paths use the \\?\UNC\ form.
+    if path.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + path.lstrip("\\")
+    if len(path) >= 260:
+        return "\\\\?\\" + path
     return path
 
 
@@ -283,15 +313,19 @@ def normalize_path(raw: str) -> str:
     if not text:
         return ""
     text = os.path.expandvars(os.path.expanduser(text))
-    return clean_path(os.path.abspath(text))
+    path = clean_path(os.path.abspath(text))
+    return to_long_path(path)
 
 
 def path_key(path: str) -> str:
+    path = strip_long_path_prefix(path)
     return os.path.normcase(os.path.abspath(path))
 
 
 def is_within_path(path: str, root: str) -> bool:
     """True if path is root itself or a descendant of root."""
+    path = strip_long_path_prefix(path)
+    root = strip_long_path_prefix(root)
     candidate = os.path.normcase(os.path.abspath(path))
     boundary = os.path.normcase(os.path.abspath(root))
     if candidate == boundary:
@@ -303,6 +337,22 @@ def is_within_path(path: str, root: str) -> bool:
 
 def is_windows() -> bool:
     return os.name == "nt"
+
+
+def open_in_explorer(path: str) -> None:
+    """Open Windows Explorer with the given path selected/highlighted."""
+    if not is_windows():
+        return
+    path = strip_long_path_prefix(path)
+    if not path:
+        return
+    try:
+        if os.path.isdir(path):
+            subprocess.Popen(["explorer", path])
+        else:
+            subprocess.Popen(["explorer", f"/select,{path}"])
+    except OSError:
+        pass
 
 
 def enable_dpi_awareness() -> None:
@@ -413,7 +463,7 @@ class Scanner:
                     try:
                         if entry.is_symlink():
                             node.link_count += 1
-                            self._maybe_progress(progress, entry.path, stats)
+                            self._maybe_progress(progress, entry.path, stats, cancel)
                             continue
                         if entry.is_dir(follow_symlinks=False):
                             if self._is_link_dir(entry):
@@ -465,7 +515,7 @@ class Scanner:
                             node.link_count += 1
                     except OSError:
                         node.error_count += 1
-                    self._maybe_progress(progress, entry.path, stats)
+                    self._maybe_progress(progress, entry.path, stats, cancel)
         except OSError:
             node.error_count += 1
             node.scan_failed = True
@@ -516,7 +566,10 @@ class Scanner:
         progress: Callable[[str, ScanStats], None],
         path: str,
         stats: ScanStats,
+        cancel: threading.Event | None = None,
     ) -> None:
+        if cancel is not None and cancel.is_set():
+            return
         now = time.monotonic()
         if now - stats.last_emit >= PROGRESS_INTERVAL_S:
             stats.last_emit = now
@@ -577,12 +630,14 @@ class TreemapView(tk.Canvas):
         self._resize_job: str | None = None
         self._too_small = 0
         self.root_other: Node | None = None
+        self._context_menu: tk.Menu | None = None
 
         self.bind("<Configure>", self._on_configure)
         self.bind("<Motion>", self._on_motion)
         self.bind("<Leave>", self._on_leave)
         self.bind("<Double-Button-1>", self._on_double_click)
         self.bind("<Button-1>", self._on_button)
+        self.bind("<Button-3>", self._on_right_click)
         self.bind("<Destroy>", self._on_destroy, add="+")
 
     def set_root(self, node: Node) -> None:
@@ -599,6 +654,12 @@ class TreemapView(tk.Canvas):
 
     def redraw(self) -> None:
         self._reset_hover()
+        if self._context_menu is not None:
+            try:
+                self._context_menu.destroy()
+            except tk.TclError:
+                pass
+            self._context_menu = None
         try:
             self.configure(cursor="")
         except tk.TclError:
@@ -1074,6 +1135,40 @@ class TreemapView(tk.Canvas):
         elif node.kind == "other":
             self.on_other(node)
 
+    def _on_right_click(self, event: tk.Event) -> None:
+        current = self.find_withtag("current")
+        if not current:
+            return
+        node = self._item_nodes.get(current[0])
+        if node is None or node.kind in ("group", "other"):
+            return
+        if self._context_menu is not None:
+            try:
+                self._context_menu.destroy()
+            except tk.TclError:
+                pass
+            self._context_menu = None
+        menu = tk.Menu(self, tearoff=False)
+        self._context_menu = menu
+
+        def do_open() -> None:
+            open_in_explorer(node.path)
+
+        def do_copy() -> None:
+            try:
+                self.clipboard_clear()
+                self.clipboard_append(strip_long_path_prefix(node.path))
+            except tk.TclError:
+                pass
+
+        menu.add_command(label="Open in Explorer", command=do_open)
+        menu.add_command(label="Copy path", command=do_copy)
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self.after(1, lambda: menu.destroy() if menu.winfo_exists() else None)
+            self._context_menu = None
+
     def _on_button(self, event: tk.Event) -> None:
         self.focus_set()
 
@@ -1111,6 +1206,7 @@ class ListWindow(tk.Toplevel):
         header: str,
         rows: list[Row] | None = None,
         loader: Loader | None = None,
+        show_path: bool = True,
         on_zoom: Callable[[Node], None] | None = None,
         on_group: Callable[[Node], None] | None = None,
         on_other: Callable[[Node], None] | None = None,
@@ -1122,6 +1218,7 @@ class ListWindow(tk.Toplevel):
         self.minsize(560, 320)
         self._rows = rows
         self._loader = loader
+        self._show_path = show_path
         self._on_zoom = on_zoom
         self._on_group = on_group
         self._on_other = on_other
@@ -1160,20 +1257,27 @@ class ListWindow(tk.Toplevel):
             rowheight=row_height,
         )
 
+        if self._show_path:
+            columns = ("name", "type", "size", "path")
+        else:
+            columns = ("name", "type", "size")
         self.tree = ttk.Treeview(
             tree_frame,
-            columns=("name", "type", "size", "path"),
+            columns=columns,
             show="headings",
             selectmode="browse",
         )
         self.tree.heading("name", text="Name")
         self.tree.heading("type", text="Type")
         self.tree.heading("size", text="Size")
-        self.tree.heading("path", text="Path")
-        self.tree.column("name", width=230, anchor="w", stretch=False)
-        self.tree.column("type", width=90, anchor="w", stretch=False)
-        self.tree.column("size", width=100, anchor="e", stretch=False)
-        self.tree.column("path", width=380, anchor="w", stretch=True)
+        if self._show_path:
+            self.tree.heading("path", text="Path")
+        name_stretch = not self._show_path
+        self.tree.column("name", width=230, anchor="w", stretch=name_stretch)
+        self.tree.column("type", width=130, anchor="w", stretch=False)
+        self.tree.column("size", width=130, anchor="e", stretch=False)
+        if self._show_path:
+            self.tree.column("path", width=380, anchor="w", stretch=True)
         self.tree.tag_configure("odd", background="#F7F7F7")
         self.tree.bind("<Double-1>", self._on_double_click)
         self.tree.bind("<Return>", self._on_double_click)
@@ -1217,6 +1321,7 @@ class ListWindow(tk.Toplevel):
         y = max(0, min(master.winfo_rooty() + 60, screen_h - win_h))
         self.geometry(f"{win_w}x{win_h}+{x}+{y}")
         self.header_label.configure(wraplength=max(300, win_w - 40))
+        self.bind("<Configure>", self._on_window_configure, add="+")
 
         if rows is not None:
             self._populate(rows, sum(row[2] for row in rows), 0)
@@ -1230,6 +1335,16 @@ class ListWindow(tk.Toplevel):
         self.lift()
         self.focus_set()
 
+    def _on_window_configure(self, event: tk.Event) -> None:
+        if event.widget is not self:
+            return
+        try:
+            width = self.winfo_width()
+        except tk.TclError:
+            return
+        if width > 1:
+            self.header_label.configure(wraplength=max(300, width - 40))
+
     def _populate(self, rows: list[Row], total: int, errors: int) -> None:
         children = self.tree.get_children()
         if children:
@@ -1237,10 +1352,14 @@ class ListWindow(tk.Toplevel):
         self._nodes.clear()
         ordered = sorted(rows, key=lambda row: (-row[2], row[0].lower()))
         for index, (name, type_name, size, path, node) in enumerate(ordered):
+            if self._show_path:
+                values = (name, type_name, format_size(size), path)
+            else:
+                values = (name, type_name, format_size(size))
             item_id = self.tree.insert(
                 "",
                 "end",
-                values=(name, type_name, format_size(size), path),
+                values=values,
                 tags=("odd",) if index % 2 else (),
             )
             self._nodes[item_id] = node
@@ -1865,7 +1984,7 @@ class TreemapApp:
         if self.view_node is None:
             return
 
-        path = self.view_node.path
+        path = strip_long_path_prefix(self.view_node.path)
         path_type = PureWindowsPath if is_windows() else PurePosixPath
         try:
             parsed = path_type(path)
@@ -2013,12 +2132,12 @@ class TreemapApp:
             return
         folder_path = node.path
         folder_name = display_name(folder_path)
-        title = f"Small files — {folder_name}"
+        title = f"Small files — {truncate_middle(folder_name, 40)}"
         header = (
-            f"Small files in {folder_path} "
-            f"(under {format_size(LARGE_FILE_THRESHOLD)}); "
-            f"{format_plural(node.small_count, 'file')}, "
-            f"{format_size(node.size)} total in the scan."
+            f"Small files in {truncate_middle(folder_path, 80)}\n"
+            f"{format_plural(node.small_count, 'file')}  •  "
+            f"{format_size(node.size)} total  •  "
+            f"under {format_size(LARGE_FILE_THRESHOLD)}"
         )
         loader = lambda cancel: load_small_files(  # noqa: E731
             folder_path, cancel, LARGE_FILE_THRESHOLD
@@ -2028,6 +2147,7 @@ class TreemapApp:
             title=title,
             header=header,
             loader=loader,
+            show_path=False,
             on_close=self._forget_list_window,
         )
         self.list_windows.append(window)
@@ -2052,10 +2172,10 @@ class TreemapApp:
                 type_name = child.kind
             rows.append((child.name, type_name, child.size, child.path, child))
         total = sum(child.size for child in node.children)
-        title = f"Other — {parent_name}"
+        title = f"Other — {truncate_middle(parent_name, 40)}"
         header = (
-            f"Items aggregated into Other in {node.path} — "
-            f"{format_plural(len(rows), 'item')}, {format_size(total)} total."
+            f"Items aggregated into Other in {truncate_middle(node.path, 80)}\n"
+            f"{format_plural(len(rows), 'item')}  •  {format_size(total)} total"
         )
         window = ListWindow(
             self.root,
