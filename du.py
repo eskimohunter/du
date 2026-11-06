@@ -11,7 +11,7 @@ library.  The main pieces, in order, are:
 * helper functions (path handling, formatting, squarified treemap layout)
 * :class:`Scanner` - builds the :class:`Node` tree in a worker thread
 * :class:`TreemapView` - draws the nested treemap on a canvas
-* :class:`ListWindow` - small-files / Other item lists
+* :class:`ListWindow` - bundled-files / Other item lists
 * :class:`TreemapApp` - top-level window, toolbar, breadcrumb, status bar
 """
 
@@ -34,9 +34,9 @@ from typing import Callable, Sequence
 
 APP_TITLE = "du – Disk Usage"
 
-# Files at or above this size get their own box. Everything smaller is grouped
-# into one "Small files" box per directory.
-LARGE_FILE_THRESHOLD = 100 * 1024 * 1024  # 100 MiB
+# Number of largest direct files to show as individual boxes. The remaining
+# direct files are grouped into one "Other files" box per directory.
+LARGE_FILE_THRESHOLD = 100
 
 # How many levels of folders may be drawn nested inside each other before a
 # folder is drawn as a plain leaf box.
@@ -102,8 +102,8 @@ class Node:
     children: list[Node] = field(default_factory=list)
     file_count: int = 0
     dir_count: int = 0
-    small_count: int = 0
-    small_size: int = 0
+    bundled_count: int = 0
+    bundled_size: int = 0
     error_count: int = 0
     link_count: int = 0
     empty_file_count: int = 0
@@ -398,18 +398,17 @@ def enable_dpi_awareness() -> None:
             pass
 
 
-def load_small_files(
+def load_bundled_files(
     folder_path: str,
     cancel: threading.Event,
-    threshold: int,
+    discrete_count: int,
 ) -> tuple[list[Row], int, int, str | None] | None:
-    """Load the direct files below ``threshold`` in ``folder_path``.
+    """Load direct files not among the first ``discrete_count`` largest.
 
-    Returns ``(rows, total_size, error_count, fatal_error)`` or ``None`` when
-    cancelled.
+    Zero-byte files are always bundled. Returns
+    ``(rows, total_size, error_count, fatal_error)`` or ``None`` when cancelled.
     """
-    rows: list[Row] = []
-    total = 0
+    files: list[tuple[os.DirEntry, int]] = []
     errors = 0
     try:
         with os.scandir(folder_path) as entries:
@@ -421,21 +420,26 @@ def load_small_files(
                         continue
                     if entry.is_file(follow_symlinks=False):
                         st = entry.stat(follow_symlinks=False)
-                        if st.st_size < threshold:
-                            node = Node(
-                                name=entry.name,
-                                path=entry.path,
-                                size=st.st_size,
-                                kind="file",
-                            )
-                            rows.append(
-                                (entry.name, "File", st.st_size, entry.path, node)
-                            )
-                            total += st.st_size
+                        files.append((entry, st.st_size))
                 except OSError:
                     errors += 1
     except OSError as exc:
         return [], 0, 0, str(exc)
+
+    positive = [(entry, size) for entry, size in files if size > 0]
+    positive.sort(key=lambda item: (-item[1], item[0].name.lower()))
+    limit = max(0, int(discrete_count))
+    bundled = positive[limit:] + [
+        (entry, size) for entry, size in files if size == 0
+    ]
+    bundled.sort(key=lambda item: (-item[1], item[0].name.lower()))
+
+    rows: list[Row] = []
+    total = 0
+    for entry, size in bundled:
+        node = Node(name=entry.name, path=entry.path, size=size, kind="file")
+        rows.append((entry.name, "File", size, entry.path, node))
+        total += size
     return rows, total, errors, None
 
 
@@ -463,8 +467,8 @@ def open_in_explorer(path: str) -> None:
 class Scanner:
     """Recursively build a :class:`Node` tree without touching Tk."""
 
-    def __init__(self, threshold: int) -> None:
-        self.threshold = threshold
+    def __init__(self, discrete_count: int) -> None:
+        self.discrete_count = discrete_count
 
     def scan(
         self,
@@ -513,6 +517,7 @@ class Scanner:
             raise ScanCancelled
         node = Node(name=name, path=path, size=0, kind="dir", parent=parent)
         index[path_key(path)] = node
+        positive_files: list[tuple[os.DirEntry, int]] = []
         try:
             with os.scandir(path) as entries:
                 for entry in entries:
@@ -557,19 +562,10 @@ class Scanner:
                             stats.bytes += size
                             if size == 0:
                                 node.empty_file_count += 1
-                            if size >= self.threshold:
-                                node.children.append(
-                                    Node(
-                                        name=entry.name,
-                                        path=entry.path,
-                                        size=size,
-                                        kind="file",
-                                        parent=node,
-                                    )
-                                )
+                                node.bundled_count += 1
+                                node.bundled_size += size
                             else:
-                                node.small_count += 1
-                                node.small_size += size
+                                positive_files.append((entry, size))
                         else:
                             node.link_count += 1
                     except OSError:
@@ -578,16 +574,31 @@ class Scanner:
         except OSError:
             node.error_count += 1
             node.scan_failed = True
-        # Group small files into a single "Small files" child when present.
-        if node.small_count:
+        # Show the largest direct files individually and bundle the rest.
+        limit = max(0, int(self.discrete_count))
+        positive_files.sort(key=lambda item: (-item[1], item[0].name.lower()))
+        for entry, size in positive_files[:limit]:
             node.children.append(
                 Node(
-                    name="Small files",
+                    name=entry.name,
+                    path=entry.path,
+                    size=size,
+                    kind="file",
+                    parent=node,
+                )
+            )
+        for entry, size in positive_files[limit:]:
+            node.bundled_count += 1
+            node.bundled_size += size
+        if node.bundled_count:
+            node.children.append(
+                Node(
+                    name="Other files",
                     path=path,
-                    size=node.small_size,
+                    size=node.bundled_size,
                     kind="group",
                     parent=node,
-                    small_count=node.small_count,
+                    bundled_count=node.bundled_count,
                 )
             )
         return node
@@ -976,7 +987,7 @@ class TreemapView(tk.Canvas):
                 COLOR_GROUP_OUTLINE,
                 COLOR_TEXT,
                 [
-                    f"Small files ({format_count(node.small_count)})",
+                    f"Other files ({format_count(node.bundled_count)})",
                     format_size(node.size),
                 ],
             )
@@ -1272,7 +1283,7 @@ class TreemapView(tk.Canvas):
 
 
 class ListWindow(tk.Toplevel):
-    """A non-modal Treeview list used for small files and Other items."""
+    """A non-modal Treeview list used for bundled files and Other items."""
 
     def __init__(
         self,
@@ -1660,7 +1671,7 @@ class TreemapApp:
         self.view = TreemapView(
             main,
             on_zoom=self._zoom_to,
-            on_group=self._open_small_files,
+            on_group=self._open_bundled_files,
             on_other=self._open_other,
             on_hover=self._on_hover,
             on_leave=self._on_leave,
@@ -2190,9 +2201,9 @@ class TreemapApp:
                 f"{format_plural(node.dir_count, 'folder')}"
             )
         elif node.kind == "file":
-            detail = "large file"
+            detail = "file"
         elif node.kind == "group":
-            detail = format_plural(node.small_count, "small file")
+            detail = format_plural(node.bundled_count, "other file")
         else:
             detail = format_plural(len(node.children), "aggregated item")
         self.status_label.config(
@@ -2212,19 +2223,23 @@ class TreemapApp:
             text = "No folder loaded — choose a folder to begin."
         self.status_label.config(text=text)
 
-    def _open_small_files(self, node: Node) -> None:
+    def _open_bundled_files(self, node: Node) -> None:
         if node.kind != "group":
             return
         folder_path = node.path
         folder_name = display_name(folder_path)
-        title = f"Small files — {truncate_middle(folder_name, 40)}"
-        header = (
-            f"Small files in {truncate_middle(folder_path, 80)}\n"
-            f"{format_plural(node.small_count, 'file')}  •  "
-            f"{format_size(node.size)} total  •  "
-            f"under {format_size(LARGE_FILE_THRESHOLD)}"
+        title = f"Other files — {truncate_middle(folder_name, 40)}"
+        beyond = (
+            "all files bundled"
+            if LARGE_FILE_THRESHOLD <= 0
+            else f"beyond first {format_count(LARGE_FILE_THRESHOLD)}"
         )
-        loader = lambda cancel: load_small_files(  # noqa: E731
+        header = (
+            f"Other files in {truncate_middle(folder_path, 80)}\n"
+            f"{format_plural(node.bundled_count, 'file')}  •  "
+            f"{format_size(node.size)} total  •  {beyond}"
+        )
+        loader = lambda cancel: load_bundled_files(  # noqa: E731
             folder_path, cancel, LARGE_FILE_THRESHOLD
         )
         window = ListWindow(
@@ -2250,9 +2265,9 @@ class TreemapApp:
             if child.kind == "dir":
                 type_name = "Folder"
             elif child.kind == "file":
-                type_name = "Large file"
+                type_name = "File"
             elif child.kind == "group":
-                type_name = "Small files"
+                type_name = "Other files"
             else:
                 type_name = child.kind
             rows.append((child.name, type_name, child.size, child.path, child))
@@ -2268,7 +2283,7 @@ class TreemapApp:
             header=header,
             rows=rows,
             on_zoom=self._zoom_to,
-            on_group=self._open_small_files,
+            on_group=self._open_bundled_files,
             on_other=self._open_other,
             on_close=self._forget_list_window,
         )

@@ -32,9 +32,36 @@ def test_scanner() -> None:
         assert result.root.empty_dir_count == 2, result.root.empty_dir_count
         assert result.root.size == 15, result.root.size
         assert len(result.nodes_by_path) == 4  # root, sub, nested, emptydir
-        # children include the small-files group
-        kinds = {c.kind for c in result.root.children}
-        assert "group" in kinds
+        # The zero-byte file is always bundled into "Other files".
+        group = next(c for c in result.root.children if c.kind == "group")
+        assert group.name == "Other files"
+        assert group.bundled_count == 1
+        assert group.size == 0
+
+
+def test_discrete_file_count() -> None:
+    with tempfile.TemporaryDirectory() as d:
+        for name, size in [
+            ("a.bin", 5),
+            ("b.bin", 10),
+            ("c.bin", 20),
+            ("zero.bin", 0),
+        ]:
+            with open(os.path.join(d, name), "wb") as f:
+                f.write(b"x" * size)
+        cancel = threading.Event()
+        result = du.Scanner(2).scan(d, cancel, lambda p, s: None)
+        discrete = sorted(c.name for c in result.root.children if c.kind == "file")
+        assert discrete == ["b.bin", "c.bin"], discrete
+        group = next(c for c in result.root.children if c.kind == "group")
+        assert group.bundled_count == 2
+        assert group.size == 5
+
+        rows, total, errors, fatal = du.load_bundled_files(d, cancel, 2)
+        assert fatal is None
+        assert errors == 0
+        assert total == 5
+        assert sorted(row[0] for row in rows) == ["a.bin", "zero.bin"]
 
 
 def test_squarify_counts() -> None:
@@ -56,7 +83,13 @@ def test_paths() -> None:
 
 
 def main() -> int:
-    tests = [test_scanner, test_squarify_counts, test_format_size, test_paths]
+    tests = [
+        test_scanner,
+        test_discrete_file_count,
+        test_squarify_counts,
+        test_format_size,
+        test_paths,
+    ]
     for t in tests:
         t()
         print(f"ok: {t.__name__}")
