@@ -50,7 +50,7 @@ If a folder is passed on the command line, it is scanned immediately after the w
 - Dark theme with blue accents.
 - Nested squarified treemap with readable folder header strips.
 - Recursive folder sizes based on logical file bytes (`st_size`).
-- The first `LARGE_FILE_THRESHOLD` largest direct files get individual boxes; the remaining direct files are grouped into one `Other files (N)` box per folder.
+- The number of largest direct files shown individually scales with the physical area of the treemap view; the remaining direct files are grouped into one `Other files (N)` box per folder.
 - Tiny items are aggregated into an `Other` box. The `Other…` toolbar button opens the aggregate list, and `Other files` groups that are too small to draw are folded into `Other` and remain reachable there.
 - Double-click a folder box to zoom into it.
 - Full-path breadcrumb; the current folder is bold, in-tree ancestors are clickable, and ancestors above the loaded search root are muted and non-clickable.
@@ -85,7 +85,8 @@ The app starts **maximized**. `F11` toggles fullscreen; `Esc` exits fullscreen w
 
 The main tuning constants are near the top of `du.py`:
 
-- `LARGE_FILE_THRESHOLD` — default `100` (number of largest direct files shown discretely; `0` or less bundles all files).
+- `DISCRETE_FILES_PER_MEGAPIXEL` — default `12.0` (how many direct files get individual boxes per million physical pixels of treemap area).
+- `MAX_DISCRETE_FILES` — default `400` (upper bound on individually drawn direct files).
 - `MAX_NEST_DEPTH` — maximum nested folder depth to draw before drawing a folder as a leaf.
 - `AGG_MIN_W`, `AGG_MIN_H`, `AGG_MIN_AREA`, `OTHER_MIN_W`, `OTHER_MIN_H` — tiny-item aggregation and minimum `Other` box size.
 - Layout and color constants (`MARGIN`, `GAP`, `COLOR_*`).

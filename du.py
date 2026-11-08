@@ -34,9 +34,10 @@ from typing import Callable, Sequence
 
 APP_TITLE = "du – Disk Usage"
 
-# Number of largest direct files to show as individual boxes. The remaining
-# direct files are grouped into one "Other files" box per directory.
-LARGE_FILE_THRESHOLD = 100
+# Number of largest direct files to show as individual boxes, scaled by the
+# physical area of the treemap view (one file per this many megapixels).
+DISCRETE_FILES_PER_MEGAPIXEL = 12.0
+MAX_DISCRETE_FILES = 400
 
 # How many levels of folders may be drawn nested inside each other before a
 # folder is drawn as a plain leaf box.
@@ -138,6 +139,7 @@ class ScanResult:
     root: Node
     nodes_by_path: dict[str, Node]
     elapsed: float
+    discrete_count: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -555,7 +557,7 @@ def open_in_explorer(path: str) -> None:
 class Scanner:
     """Recursively build a :class:`Node` tree without touching Tk."""
 
-    def __init__(self, discrete_count: int) -> None:
+    def __init__(self, discrete_count: int = 1) -> None:
         self.discrete_count = discrete_count
 
     def scan(
@@ -563,12 +565,14 @@ class Scanner:
         root_path: str,
         cancel: threading.Event,
         progress: Callable[[str, ScanStats], None],
+        discrete_count: int | None = None,
     ) -> ScanResult:
         """Scan ``root_path`` and return a :class:`ScanResult`.
 
         ``progress`` is called (from the worker thread) with the current path
         and running stats.  Raises :class:`ScanCancelled` if cancelled.
         """
+        count = self.discrete_count if discrete_count is None else int(discrete_count)
         start = time.monotonic()
         stats = ScanStats(last_emit=start)
         index: dict[str, Node] = {}
@@ -582,11 +586,13 @@ class Scanner:
             stats,
             start,
             index,
+            count,
         )
         return ScanResult(
             root=root,
             nodes_by_path=index,
             elapsed=time.monotonic() - start,
+            discrete_count=count,
         )
 
     def _scan_dir(
@@ -599,6 +605,7 @@ class Scanner:
         stats: ScanStats,
         start: float,
         index: dict[str, Node],
+        discrete_count: int,
     ) -> Node:
         """Scan one directory and return its node."""
         if cancel.is_set():
@@ -630,6 +637,7 @@ class Scanner:
                                     stats,
                                     start,
                                     index,
+                                    discrete_count,
                                 )
                                 node.children.append(child)
                                 node.size += child.size
@@ -663,7 +671,7 @@ class Scanner:
             node.error_count += 1
             node.scan_failed = True
         # Show the largest direct files individually and bundle the rest.
-        limit = max(0, int(self.discrete_count))
+        limit = max(0, int(discrete_count))
         positive_files.sort(key=lambda item: (-item[1], item[0].name.lower()))
         for entry, size in positive_files[:limit]:
             node.children.append(
@@ -1648,7 +1656,8 @@ class TreemapApp:
     def __init__(self, root: tk.Tk, initial_path: str | None = None) -> None:
         self.root = root
         self.initial_path = initial_path
-        self.scanner = Scanner(LARGE_FILE_THRESHOLD)
+        self.scanner = Scanner()
+        self.discrete_count = 1
         self.queue: queue.Queue = queue.Queue()
         self.scan_gen = 0
         self.cancel_event: threading.Event | None = None
@@ -1884,6 +1893,27 @@ class TreemapApp:
         if selected:
             self.load_path(selected)
 
+    def _discrete_file_limit(self) -> int:
+        """Number of direct files to show individually for the current view."""
+        try:
+            self.root.update_idletasks()
+        except tk.TclError:
+            pass
+        width = self.view.winfo_width()
+        height = self.view.winfo_height()
+        if width <= 1 or height <= 1:
+            width = self.root.winfo_width()
+            height = self.root.winfo_height()
+        width = max(1, width)
+        height = max(1, height)
+        # enable_dpi_awareness() makes Tk report device pixels, so the area
+        # already scales with the display DPI.
+        physical_area = width * height
+        count = round(
+            physical_area / 1_000_000 * DISCRETE_FILES_PER_MEGAPIXEL
+        )
+        return max(1, min(MAX_DISCRETE_FILES, count))
+
     def _start_scan(self, path: str, kind: str) -> None:
         if self._closing:
             return
@@ -1923,9 +1953,10 @@ class TreemapApp:
 
         self._update_buttons()
         self._update_status_idle()
+        discrete_count = self._discrete_file_limit()
         threading.Thread(
             target=self._scan_worker,
-            args=(path, generation, cancel),
+            args=(path, generation, cancel, discrete_count),
             daemon=True,
         ).start()
 
@@ -1934,6 +1965,7 @@ class TreemapApp:
         path: str,
         generation: int,
         cancel: threading.Event,
+        discrete_count: int,
     ) -> None:
         def progress(current_path: str, stats: ScanStats) -> None:
             self.queue.put(
@@ -1941,7 +1973,7 @@ class TreemapApp:
             )
 
         try:
-            result = self.scanner.scan(path, cancel, progress)
+            result = self.scanner.scan(path, cancel, progress, discrete_count)
             if cancel.is_set():
                 self.queue.put(("cancelled", generation))
             else:
@@ -2005,6 +2037,7 @@ class TreemapApp:
         self.tree_root = result.root
         self.nodes_by_path = result.nodes_by_path
         self.current_scan_root = result.root.path
+        self.discrete_count = result.discrete_count
 
         fallback = False
         if kind == "refresh" and target_path:
@@ -2328,8 +2361,8 @@ class TreemapApp:
         title = f"Other files — {truncate_middle(folder_name, 40)}"
         beyond = (
             "all files bundled"
-            if LARGE_FILE_THRESHOLD <= 0
-            else f"beyond first {format_count(LARGE_FILE_THRESHOLD)}"
+            if self.discrete_count <= 0
+            else f"beyond first {format_count(self.discrete_count)}"
         )
         header = (
             f"Other files in {truncate_middle(folder_path, 80)}\n"
@@ -2337,7 +2370,7 @@ class TreemapApp:
             f"{format_size(node.size)} total  ·  {beyond}"
         )
         loader = lambda cancel: load_bundled_files(  # noqa: E731
-            folder_path, cancel, LARGE_FILE_THRESHOLD
+            folder_path, cancel, self.discrete_count
         )
         window = ListWindow(
             self.root,

@@ -19,7 +19,7 @@
 
 - Order in `du.py`: helpers/squarify -> Scanner -> TreemapView -> ListWindow -> TreemapApp -> main.
 - Scanner builds the Node tree in a worker thread; Tk is only touched on the main thread through `queue` + `after` polling. Preserve scan generation/cancel behavior.
-- Folder sizes are recursive logical `st_size`; `LARGE_FILE_THRESHOLD` at the top (100) is the number of largest direct files shown discretely; the rest are grouped into an `Other files` box. Hidden/system files are included; symlinks/junctions/mount points are skipped; zero-size items are counted but not drawn.
+- Folder sizes are recursive logical `st_size`; the number of largest direct files shown discretely is computed from the treemap's physical area (`DISCRETE_FILES_PER_MEGAPIXEL`, capped by `MAX_DISCRETE_FILES`); the rest are grouped into an `Other files` box. Hidden/system files are included; symlinks/junctions/mount points are skipped; zero-size items are counted but not drawn.
 - Long paths: `normalize_path` applies the `\\?\` prefix on Windows; `strip_long_path_prefix` keeps display/breadcrumb/path-key consistent.
 - Treemap is recursive squarified. `Other` aggregation and the compact Other box are intentional; keep the Other button/list usable when the box is tiny or covered.
 - Navigation boundary: `tree_root` is the loaded search root. `on_up` must stop there; breadcrumb ancestors above it are muted/non-clickable (`is_within_path`). The path box/Browse start a new search root. Do not restore parent-loading in `on_up` or `_on_breadcrumb_click`.

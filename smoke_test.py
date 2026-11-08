@@ -25,7 +25,7 @@ def test_scanner() -> None:
     with tempfile.TemporaryDirectory() as d:
         make_fixture(d)
         cancel = threading.Event()
-        result = du.Scanner(du.LARGE_FILE_THRESHOLD).scan(d, cancel, lambda p, s: None)
+        result = du.Scanner(100).scan(d, cancel, lambda p, s: None)
         assert result.root.file_count == 3, result.root.file_count
         assert result.root.dir_count == 3, result.root.dir_count
         assert result.root.empty_file_count == 1, result.root.empty_file_count
