@@ -62,23 +62,30 @@ AGG_MIN_AREA = AGG_MIN_W * AGG_MIN_H
 OTHER_MIN_W = 48
 OTHER_MIN_H = 24
 
-# Colour palette (light theme).
-COLOR_CANVAS = "#F4F5F7"
-COLOR_FOLDER_BODY = "#DCE8F0"
-COLOR_FOLDER_LEAF = "#C4DCE8"
-COLOR_FOLDER_HEADER = "#3E6B85"
-COLOR_FOLDER_OUTLINE = "#2F556B"
-COLOR_HEADER_TEXT = "#FFFFFF"
-COLOR_FILE = "#F2B35D"
-COLOR_FILE_OUTLINE = "#B7791F"
-COLOR_GROUP = "#C9CDD2"
-COLOR_GROUP_OUTLINE = "#7A7F85"
-COLOR_OTHER = "#B9A7D6"
-COLOR_OTHER_OUTLINE = "#6B5B95"
-COLOR_TEXT = "#1A1A1A"
-COLOR_MUTED = "#5F6368"
-COLOR_LINK = "#1A73E8"
-COLOR_HOVER = "#D7263D"
+# Colour palette (dark theme with blue accents).
+COLOR_CANVAS = "#161A1F"
+COLOR_FOLDER_BODY = "#1F2A33"
+COLOR_FOLDER_LEAF = "#26343F"
+COLOR_FOLDER_HEADER = "#2D5F7E"
+COLOR_FOLDER_OUTLINE = "#4B8CB8"
+COLOR_HEADER_TEXT = "#F2F7FB"
+COLOR_FILE = "#3E8FCC"
+COLOR_FILE_OUTLINE = "#7CC4F0"
+COLOR_GROUP = "#2A3038"
+COLOR_GROUP_OUTLINE = "#5C6875"
+COLOR_OTHER = "#3A3550"
+COLOR_OTHER_OUTLINE = "#8B7FC4"
+COLOR_TEXT = "#E6EDF3"
+COLOR_MUTED = "#9AA7B4"
+COLOR_LINK = "#58A6FF"
+COLOR_HOVER = "#4FC3F7"
+COLOR_INPUT_BG = "#11151A"
+COLOR_BUTTON = "#24303A"
+COLOR_BUTTON_HOVER = "#2F6F9F"
+COLOR_SELECTION = "#2F6F9F"
+COLOR_ROW_ALT = "#1C232B"
+COLOR_MENU_BG = "#1F262E"
+COLOR_MENU_ACTIVE = "#2F6F9F"
 
 
 class ScanCancelled(Exception):
@@ -396,6 +403,87 @@ def enable_dpi_awareness() -> None:
             ctypes.windll.user32.SetProcessDPIAware()
         except Exception:
             pass
+
+
+def enable_dark_titlebar(window: tk.Misc) -> None:
+    """Ask Windows to draw a dark title bar (best effort)."""
+    if not is_windows():
+        return
+    try:
+        window.update_idletasks()
+        hwnd = ctypes.windll.user32.GetParent(window.winfo_id())
+        value = ctypes.c_int(1)
+        for attribute in (20, 19):
+            try:
+                ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                    hwnd, attribute, ctypes.byref(value), ctypes.sizeof(value)
+                )
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
+def apply_dark_theme(root: tk.Misc) -> ttk.Style:
+    """Apply the dark palette to the Tk/ttk widgets."""
+    style = ttk.Style(root)
+    try:
+        style.theme_use("clam")
+    except tk.TclError:
+        pass
+
+    root.configure(bg=COLOR_CANVAS)
+    style.configure("TFrame", background=COLOR_CANVAS)
+    style.configure("TLabel", background=COLOR_CANVAS, foreground=COLOR_TEXT)
+    style.configure(
+        "TButton",
+        background=COLOR_BUTTON,
+        foreground=COLOR_TEXT,
+        bordercolor=COLOR_FOLDER_OUTLINE,
+        focuscolor=COLOR_LINK,
+    )
+    style.map(
+        "TButton",
+        background=[
+            ("active", COLOR_BUTTON_HOVER),
+            ("pressed", COLOR_FOLDER_HEADER),
+        ],
+        foreground=[("disabled", COLOR_MUTED)],
+    )
+    style.configure(
+        "TEntry",
+        fieldbackground=COLOR_INPUT_BG,
+        foreground=COLOR_TEXT,
+        insertcolor=COLOR_TEXT,
+        bordercolor=COLOR_FOLDER_OUTLINE,
+    )
+    style.configure("TSeparator", background=COLOR_FOLDER_OUTLINE)
+    style.configure(
+        "Treeview",
+        background=COLOR_INPUT_BG,
+        fieldbackground=COLOR_INPUT_BG,
+        foreground=COLOR_TEXT,
+        bordercolor=COLOR_FOLDER_OUTLINE,
+    )
+    style.configure(
+        "Treeview.Heading",
+        background=COLOR_FOLDER_HEADER,
+        foreground=COLOR_HEADER_TEXT,
+        bordercolor=COLOR_FOLDER_OUTLINE,
+    )
+    style.map(
+        "Treeview",
+        background=[("selected", COLOR_SELECTION)],
+        foreground=[("selected", COLOR_HEADER_TEXT)],
+    )
+    style.configure(
+        "TScrollbar",
+        background=COLOR_BUTTON,
+        troughcolor=COLOR_CANVAS,
+        arrowcolor=COLOR_TEXT,
+        bordercolor=COLOR_CANVAS,
+    )
+    return style
 
 
 def load_bundled_files(
@@ -1230,7 +1318,14 @@ class TreemapView(tk.Canvas):
             except tk.TclError:
                 pass
             self._context_menu = None
-        menu = tk.Menu(self, tearoff=False)
+        menu = tk.Menu(
+            self,
+            tearoff=False,
+            bg=COLOR_MENU_BG,
+            fg=COLOR_TEXT,
+            activebackground=COLOR_MENU_ACTIVE,
+            activeforeground=COLOR_HEADER_TEXT,
+        )
         self._context_menu = menu
 
         def do_open() -> None:
@@ -1300,6 +1395,7 @@ class ListWindow(tk.Toplevel):
         on_close: Callable[["ListWindow"], None] | None = None,
     ) -> None:
         super().__init__(master)
+        apply_dark_theme(self)
         self.title(title)
         self.transient(master)
         self.minsize(560, 320)
@@ -1365,7 +1461,7 @@ class ListWindow(tk.Toplevel):
         self.tree.column("size", width=130, anchor="e", stretch=False)
         if self._show_path:
             self.tree.column("path", width=380, anchor="w", stretch=True)
-        self.tree.tag_configure("odd", background="#F7F7F7")
+        self.tree.tag_configure("odd", background=COLOR_ROW_ALT)
         self.tree.bind("<Double-1>", self._on_double_click)
         self.tree.bind("<Return>", self._on_double_click)
 
@@ -1408,6 +1504,8 @@ class ListWindow(tk.Toplevel):
         y = max(0, min(master.winfo_rooty() + 60, screen_h - win_h))
         self.geometry(f"{win_w}x{win_h}+{x}+{y}")
         self.header_label.configure(wraplength=max(300, win_w - 40))
+        enable_dark_titlebar(self)
+        self.after(50, lambda: enable_dark_titlebar(self))
         self.bind("<Configure>", self._on_window_configure, add="+")
 
         if rows is not None:
@@ -1596,10 +1694,8 @@ class TreemapApp:
         y = max(0, (screen_h - height) // 2)
         self.root.geometry(f"{width}x{height}+{x}+{y}")
 
-        self.style = ttk.Style(self.root)
-        self._breadcrumb_bg = (
-            self.style.lookup("TFrame", "background") or self.root.cget("bg")
-        )
+        self.style = apply_dark_theme(self.root)
+        self._breadcrumb_bg = COLOR_CANVAS
 
         main = ttk.Frame(self.root, padding=(8, 8, 8, 4))
         main.grid(row=0, column=0, sticky="nsew")
@@ -1685,6 +1781,7 @@ class TreemapApp:
         self.root.bind("<Escape>", lambda event: self._on_escape())
         self.root.bind("<Alt-Up>", lambda event: self.on_up())
         self.root.bind("<Alt-Left>", lambda event: self.on_up())
+        enable_dark_titlebar(self.root)
 
     def _maximize(self) -> None:
         try:
@@ -2176,7 +2273,7 @@ class TreemapApp:
                     "items not drawn",
                 )
             )
-        self.summary_label.config(text="  •  ".join(parts))
+        self.summary_label.config(text="  ·  ".join(parts))
 
     def _on_view_stats(self, too_small: int) -> None:
         self._too_small_count = too_small
@@ -2192,7 +2289,7 @@ class TreemapApp:
         percentage = ""
         if node.parent is not None and node.parent.size > 0:
             percentage = (
-                f"  •  {node.size / node.parent.size * 100:.1f}% "
+                f"  ·  {node.size / node.parent.size * 100:.1f}% "
                 f"of {node.parent.name}"
             )
         if node.kind == "dir":
@@ -2207,7 +2304,7 @@ class TreemapApp:
         else:
             detail = format_plural(len(node.children), "aggregated item")
         self.status_label.config(
-            text=f"{node.path}  •  {format_size(node.size)}  •  {detail}{percentage}"
+            text=f"{node.path}  ·  {format_size(node.size)}  ·  {detail}{percentage}"
         )
 
     def _on_leave(self) -> None:
@@ -2236,8 +2333,8 @@ class TreemapApp:
         )
         header = (
             f"Other files in {truncate_middle(folder_path, 80)}\n"
-            f"{format_plural(node.bundled_count, 'file')}  •  "
-            f"{format_size(node.size)} total  •  {beyond}"
+            f"{format_plural(node.bundled_count, 'file')}  ·  "
+            f"{format_size(node.size)} total  ·  {beyond}"
         )
         loader = lambda cancel: load_bundled_files(  # noqa: E731
             folder_path, cancel, LARGE_FILE_THRESHOLD
@@ -2275,7 +2372,7 @@ class TreemapApp:
         title = f"Other — {truncate_middle(parent_name, 40)}"
         header = (
             f"Items aggregated into Other in {truncate_middle(node.path, 80)}\n"
-            f"{format_plural(len(rows), 'item')}  •  {format_size(total)} total"
+            f"{format_plural(len(rows), 'item')}  ·  {format_size(total)} total"
         )
         window = ListWindow(
             self.root,

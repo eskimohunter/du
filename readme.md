@@ -47,6 +47,7 @@ If a folder is passed on the command line, it is scanned immediately after the w
 
 ## Features
 
+- Dark theme with blue accents.
 - Nested squarified treemap with readable folder header strips.
 - Recursive folder sizes based on logical file bytes (`st_size`).
 - The first `LARGE_FILE_THRESHOLD` largest direct files get individual boxes; the remaining direct files are grouped into one `Other files (N)` box per folder.
